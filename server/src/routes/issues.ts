@@ -13398,6 +13398,12 @@ export function issueRoutes(
         req,
         collectIssueWorkspaceCommandPaths(req.body),
       );
+      // Children inherit the same completion-gate contract as top-level creates.
+      assertNoAgentCompletionRequirementSupply(
+        req,
+        (req.body as { completionRequirement?: unknown }).completionRequirement,
+        "the completion requirement",
+      );
       const sanitizedBody = await sanitizeIssueCreateAttribution(
         db,
         req,
