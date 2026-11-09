@@ -1,3 +1,4 @@
+import { hasProviderQuotaRetryBudget } from "../execution-recovery-attempt.js";
 import { settleOwnableKind } from "../recovery/ownership-invariant-report.js";
 import { ORPHANED_RUN_LEASE_FAILURE_REASON } from "../environment-run-lease-settlement.js";
 import { ENVIRONMENT_LEASE_CONTROLLER_KEY } from "../environment-lease-controller.js";
@@ -1325,6 +1326,19 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         }
         // Settlement can save restore-failure evidence after the shutdown CAS.
         let interrupted = (control && await getRun(run.id, { includeExecutionEvidence: true })) ?? interruptedStatus.run;
+        if (interrupted.runtimeMode === "legacy" && hasProviderQuotaRetryBudget(run) &&
+            interrupted.executionStage === "preparing" && !interrupted.processPid && !interrupted.processGroupId) {
+          const [certified] = await db.update(heartbeatRuns).set({
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+              errorFamily: "provider_quota", executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+            })}::jsonb`,
+            updatedAt: new Date(),
+          }).where(and(eq(heartbeatRuns.id, interrupted.id), eq(heartbeatRuns.status, "interrupted"),
+            eq(heartbeatRuns.errorCode, "server_shutdown_interrupted"), eq(heartbeatRuns.executionStage, "preparing"),
+            isNull(heartbeatRuns.processPid), isNull(heartbeatRuns.processGroupId))).returning();
+          interrupted = certified ?? (await getRun(run.id, { includeExecutionEvidence: true })) ?? interrupted;
+        }
+
         await setWakeupStatus(run.wakeupRequestId, "cancelled", {
           finishedAt: now,
           error: null,
@@ -2661,6 +2675,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         run.controllerBootId !== legacyControllerBootId &&
         !revokedState.processPid &&
         !revokedState.processGroupId;
+      const retryBudgetRun = restartInterruptedBeforeDispatch
+        ? run : { ...run, errorCode: "process_lost", resultJson: null };
       const shouldRetry =
         !await pendingCaseHandoffForRun(db, run.id, run.companyId) &&
         // Process loss spends the durable failure retry budget that
@@ -2668,7 +2684,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         // "Shutdown, process loss, and provider failure"). Checking it here
         // keeps "retrying once" honest and lets an exhausted chain fall
         // through to the interaction continuation path below.
-        !failedRunRetryBudgetSpent(run) &&
+        !failedRunRetryBudgetSpent(retryBudgetRun) &&
         ((tracksLegacyLocalChild &&
           (!!run.processPid || !!run.processGroupId)) ||
           restartInterruptedBeforeDispatch ||
@@ -2701,7 +2717,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
                   ...parseObject(run.resultJson),
                   processLossDiagnostic,
                   ...(restartInterruptedBeforeDispatch
-                    ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } }
+                    ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+                        ...(hasProviderQuotaRetryBudget(run) ? { errorFamily: "provider_quota" } : {}) }
                     : {}),
                 },
                 errorCode: "process_lost",
