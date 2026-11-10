@@ -2914,3 +2914,5 @@ export {
   TASK_IDENTITY_CHANGED_FIELD,
   issueActivityChangesTaskIdentity,
 } from "./issue-activity-identity.js";
+
+export { isActionableAttention, supportsAttentionRecoveryResolution } from "./types/attention.js";
