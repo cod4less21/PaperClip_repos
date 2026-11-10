@@ -1,7 +1,7 @@
 import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Plus, Search, Users, X } from "lucide-react";
 import { Badge } from "./ui/badge";
-import type { Agent } from "@paperclipai/shared";
+import type { Agent, Issue } from "@paperclipai/shared";
 import { AgentChatPicker } from "@/components/AgentChatPicker";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,8 @@ import { agentRouteRef, cn } from "@/lib/utils";
 
 export interface AgentConversationSidebarProps {
   agents: Agent[];
+  chats?: { chat: Issue; agent: Agent }[];
+  onSelectHistory?: () => void;
   /** Agents with a saved conversation; defaults to every listed agent. */
   existingChatAgentIds?: readonly string[];
   availableAgents?: Agent[];
@@ -32,8 +34,8 @@ export interface AgentConversationSidebarProps {
   renderAgentAction?: (agent: Agent) => ReactNode;
 }
 
-/** Searchable navigation for one conversation per agent. */
-export function AgentConversationSidebar({ agents, existingChatAgentIds, availableAgents = agents, activeId, previews = {}, unreadAgentIds = [], unreadMessageCounts, loading = false, error, onRetry, initialSearch = "", onSelect, onBrowse, onAddChat, historyLoading, historyError, onRetryHistory, onCreateAgent, renderAgentAction }: AgentConversationSidebarProps) {
+/** Searchable navigation for conversations and available agents. */
+export function AgentConversationSidebar({ agents, chats, onSelectHistory, existingChatAgentIds, availableAgents = agents, activeId, previews = {}, unreadAgentIds = [], unreadMessageCounts, loading = false, error, onRetry, initialSearch = "", onSelect, onBrowse, onAddChat, historyLoading, historyError, onRetryHistory, onCreateAgent, renderAgentAction }: AgentConversationSidebarProps) {
   const navigate = useNavigate();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [search, setSearch] = useState(initialSearch);
@@ -56,8 +58,22 @@ export function AgentConversationSidebar({ agents, existingChatAgentIds, availab
           className="h-9 pl-8 pr-8 text-xs md:text-xs" />
         {search && <Button variant="ghost" size="icon-xs" aria-label="Clear search" className="absolute right-1 top-1/2 -translate-y-1/2" onClick={focusSearch}><X className="size-3" /></Button>}
       </div>
+      {onAddChat && <Button variant="ghost" size="icon-sm" aria-label="Add chat" onClick={() => setPickerOpen(true)}><Plus className="size-4" /></Button>}
     </div>
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3 scrollbar-auto-hide">
+      {!!chats?.length && <nav aria-label="Chat history" className="flex flex-col gap-1">
+        <p className="px-2 text-xs font-medium text-muted-foreground">Conversations</p>
+        {chats.filter(({ agent, chat }) => `${agent.name} ${chat.title}`.toLocaleLowerCase().includes(query)).map(({ agent, chat }) =>
+          <Link key={chat.id} to={`/chats/${encodeURIComponent(agent.status === "terminated" ? agent.id : agentRouteRef(agent))}/${chat.id}`} onClick={onSelectHistory} className="rounded-md px-2 py-2 text-sm hover:bg-accent">
+            <span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate">{chat.title}</span>
+              {(chat.unreadMessageCount ?? 0) > 0 ? <Badge variant="ghost" aria-label={`${chat.unreadMessageCount} unread ${chat.unreadMessageCount === 1 ? "message" : "messages"} in ${chat.title}`} className="shrink-0 bg-primary font-mono tabular-nums text-primary-foreground">{chat.unreadMessageCount}</Badge>
+                : chat.isUnreadForMe && <span role="img" aria-label={`Unread messages in ${chat.title}`} className="size-2 shrink-0 rounded-full bg-primary" />}
+            </span><span className="text-xs text-muted-foreground">{agent.name} · {new Date(chat.createdAt).toLocaleString()}</span>
+          </Link>)}
+      </nav>}
+      <p className="px-2 text-(length:--text-micro) font-medium uppercase tracking-widest text-muted-foreground">
+        {query ? "Search results" : "Teammates"}
+      </p>
       <span role="status" className="sr-only">{loading ? "Loading agents" : `${visible.length} ${visible.length === 1 ? "agent" : "agents"}`}</span>
       {historyLoading && <p role="status" className="px-2 text-xs text-muted-foreground">Loading chat history…</p>}
       {historyError && <div role="alert" className="flex flex-col items-start gap-2 px-2 py-3">
@@ -106,7 +122,7 @@ export function AgentConversationSidebar({ agents, existingChatAgentIds, availab
     </div>}
     <AgentChatPicker agents={availableAgents} open={pickerOpen} onOpenChange={setPickerOpen}
       unreadMessageCounts={unreadMessageCounts}
-      existingChatAgentIds={existingChatAgentIds ?? agents.map(agent => agent.id)} loading={loading} error={error} onRetry={onRetry}
+      existingChatAgentIds={onAddChat ? [] : existingChatAgentIds ?? agents.map(agent => agent.id)} loading={loading} error={error} onRetry={onRetry}
       renderAgentIcon={agent => <AgentAvatar agent={agent} size={32} />}
       onSelect={async (agent, signal) => {
         if (onAddChat) await onAddChat(agent, signal);
