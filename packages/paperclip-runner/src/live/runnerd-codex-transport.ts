@@ -1566,6 +1566,8 @@ export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionD
   recoveryLaunch?: { requirements: RunnerProviderLaunchRequirements };
   opencodePermissionMode?: NativeOpenCodePermissionMode;
   acpxAgent?: QualifiedAcpxAgent;
+  /** Host-authorized, run-bound opt-in for the built-in quota pool. */
+  builtinQuotaPoolCapability?: import("../contracts/native-execution.js").BuiltinQuotaPoolCapability;
   /** Explicit evaluation-only candidate selection, never derived from persisted session input. */
   acpxCandidateProfile?: "pi" | "cursor" | "copilot" | "kimi";
   /** Server/operator authority; never derived from persisted agent or provider input. */
@@ -2977,6 +2979,7 @@ async function settleRetainedRunnerdSessionOwned(
       onProtocolIntegrityError: (error) => {
         failure = error;
       },
+      onPersistenceError: (error) => { failure = error; },
       onSemanticToolInput: async () => {
         // Never delegate a tool from a cleanup connection.
         throw maintenanceDenied();
@@ -6056,6 +6059,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       expectedRunnerVersion: runnerArtifact.version,
       expectedRunnerDigest: runnerArtifact.digest,
       onProtocolIntegrityError: (error) => this.#failTransport(error),
+      onPersistenceError: (error) => this.#failTransport(error),
       // The runner process is up once it authenticates; provider work follows.
       onAuthenticatedConnection: () => this.#startupSteps?.advance("runner.process.launch", "provider.session.load"),
       get authorityRunId() { return authorityRunId(); },
@@ -6579,6 +6583,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       expectedRunnerVersion: runnerArtifact.version,
       expectedRunnerDigest: runnerArtifact.digest,
       onProtocolIntegrityError: (error) => this.#failTransport(error),
+      onPersistenceError: (error) => this.#failTransport(error),
       // The runner process is up once it authenticates; provider work follows.
       onAuthenticatedConnection: () => this.#startupSteps?.advance("runner.process.launch", "provider.session.load"),
       get authorityRunId() { return authorityRunId(); },

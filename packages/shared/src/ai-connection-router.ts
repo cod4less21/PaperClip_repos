@@ -2,6 +2,8 @@ import { z } from "zod";
 import { aiConnectionBindingSchema, type AiConnectionBinding } from "./ai-connections.js";
 import type { AiConnectionUsage } from "./ai-connection-usage.js";
 
+export const BUILTIN_AI_FAILOVER_ROUTER_KEY = "paperclip.builtin.ordered-failover";
+
 export const aiConnectionRouterBindingSchema = z.object({
   mode: z.literal("router"),
   connectionId: z.string().uuid(),
@@ -20,18 +22,25 @@ export const aiConnectionPoolMemberSchema = z.object({
   }).strict(),
 }).strict();
 export const aiConnectionPoolConfigSchema = z.object({
+  schemaVersion: z.literal(2).optional(),
+  kind: z.literal("harness_pool").optional(),
   name: z.string().trim().min(1).max(160),
   enabled: z.boolean().default(false),
-  mode: z.enum(["round_robin", "usage_aware"]).default("round_robin"),
+  mode: z.enum(["round_robin", "usage_aware", "failover"]).default("round_robin"),
   thresholdPercent: z.number().int().min(1).max(100).default(90),
   members: z.array(aiConnectionPoolMemberSchema).min(1).max(100),
 }).strict().superRefine((v, ctx) => {
   const ids = new Set<string>();
   const grants = new Set<string>();
   const connections = new Set<string>();
+  const configurations = new Set<string>();
+  if ((v.schemaVersion === 2) !== (v.kind === "harness_pool") || (v.kind === "harness_pool" && v.mode !== "failover"))
+    ctx.addIssue({ code: "custom", message: "Invalid versioned harness pool" });
   for (const [index, member] of v.members.entries()) {
     const grant = `${member.binding.connectionId}:${member.binding.grantId}`;
-    if (ids.has(member.id) || grants.has(grant) || connections.has(member.binding.connectionId)) ctx.addIssue({ code: "custom", path: ["members", index], message: "Duplicate pool member" });
+    const configuration = JSON.stringify([member.binding, member.profile]);
+    if (ids.has(member.id) || (v.kind === "harness_pool" ? configurations.has(configuration) : grants.has(grant) || connections.has(member.binding.connectionId))) ctx.addIssue({ code: "custom", path: ["members", index], message: "Duplicate pool member" });
+    configurations.add(configuration);
     ids.add(member.id); grants.add(grant); connections.add(member.binding.connectionId);
     if (member.profile.provider === "acpx" && !member.profile.acpxAgent) ctx.addIssue({ code: "custom", path: ["members", index, "profile"], message: "Choose an ACP harness" });
   }
@@ -69,6 +78,9 @@ export interface AiConnectionPoolSaveInput {
   config: AiConnectionPoolConfig;
 }
 export interface AiConnectionRouterSelection {
+  runnerScope?: { environmentId: string | null };
+  /** Execution harness selected by the host; absent on pre-upgrade allocations. */
+  adapterType?: string;
   poolId: string;
   memberId: string;
   binding: AiConnectionBinding;
