@@ -1,3 +1,5 @@
+import { slackAnswerNeedsFreshReply } from "../slack/public-progress.js";
+import { notifyChatNativeProgress } from "../../chat-native-progress-notifications.js";
 import type { ChatPublicationPreparationWait } from "./preparation.js";
 import { notifyChatResponseAvailability } from "../../chat-response-availability.js";
 import { notifyVoicePublication } from "../../voice/voice-reply-notifications.js";
@@ -648,6 +650,9 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
           await publicationLease.assertOwned();
           await db.transaction(async (tx) => {
             await notifyChatPublicationWork(tx, publication);
+            if (progressSupersessionReason === "Acknowledged by contextual fast response") {
+              await notifyChatNativeProgress(tx, { companyId: publication.companyId, issueId: publication.issueId });
+            }
             return tx
               .update(chatPublications)
               .set({
@@ -691,7 +696,8 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
                 publication,
                 endpoint,
               );
-              const replaceProviderMessageId = endpoint.provider !== "imessage-photon" && CAPABILITIES[endpoint.provider]
+              const freshSlackAnswer = endpoint.provider === "slack" && slackAnswerNeedsFreshReply(publication, payload);
+              const replaceProviderMessageId = !freshSlackAnswer && endpoint.provider !== "imessage-photon" && CAPABILITIES[endpoint.provider]
                 .messageEdits
                 ? (closedProgress?.providerMessageId ??
                   (await interactionResolutionPublicationToReplace(
@@ -881,6 +887,11 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
                 await credentialLease.assertOwned(tx);
                 const committedAt = new Date();
                 await notifyChatPublicationWork(tx, publication);
+                if (publication.payload.progressState === "working") {
+                  // A newer candidate can be waiting on this lane's receipt.
+                  // Wake its owner at commit; no polling during delivery/retry.
+                  await notifyChatNativeProgress(tx, { companyId: publication.companyId, issueId: publication.issueId });
+                }
                 await notifyVoicePublication(tx, authorizationClaim.endpoint, publication.conversationId);
                 const [completedPublication] = await tx
                   .update(chatPublications)
