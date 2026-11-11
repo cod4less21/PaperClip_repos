@@ -69,6 +69,7 @@ import { issueThreadInteractionService } from "../../services/issue-thread-inter
 import { resolveExternalChatQuestionResponse } from "../../services/native-runtime/external-chat-question-response.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../../services/chat-run-publications.js";
 import { PhotonChatAdapter } from "../../services/photon/adapter.js";
+import { PhotonReceiver } from "../../services/photon/receiver.js";
 import { PhotonCloudClient, PhotonError } from "../../services/photon/cloud.js";
 import { photonFixture, photonEvent as livePhotonEvent, photonChat, stream } from "./fixture.js";
 
@@ -434,6 +435,145 @@ describe("iMessage Photon channel control plane", () => {
     } finally { unsubscribe(); db.$client.options.debug = debug; if ("stop" in worker) worker.stop(); }
   });
 
+  it("recovers local intake through normal Runtime ownership after a real failure-write rollback", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const started: PhotonReceiver[] = [], start = PhotonReceiver.prototype.start;
+    vi.spyOn(PhotonReceiver.prototype, "start").mockImplementation(function(this: PhotonReceiver) { started.push(this); start.call(this); });
+    const t = await setup(), source = new PhotonError("network", "controlled recoverable Photon interruption"), persistence = new Error("controlled real failure-write rollback");
+    const coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => true, onError: vi.fn() });
+    coordinators.push(coordinator);
+    const transaction = db.transaction.bind(db);
+    let armed = true, rolledBack = false, failureWrites = 0, primary: unknown;
+    db.transaction = (work, ...args) => transaction(async tx => {
+      const result = await work(tx);
+      if (result && typeof result === "object" && "kind" in result && result.kind === "recorded") {
+        const [endpoint] = await tx.select({ status: chatEndpoints.status, healthMessage: chatEndpoints.healthMessage })
+          .from(chatEndpoints).where(and(eq(chatEndpoints.companyId, t.companyId), eq(chatEndpoints.id, t.endpoint.id)));
+        if (endpoint?.status === "attention" && endpoint.healthMessage === source.message) {
+          failureWrites++;
+          if (armed) { armed = false; throw persistence; }
+        }
+      }
+      return result;
+    }, ...args).catch(error => { if (error === persistence) rolledBack = true; throw error; });
+    try {
+      await t.service.registerReceiverWork(coordinator, () => true).ready;
+      const first = t.service.runtime.get(t.endpoint.id); expect(first).not.toBeNull();
+      const remove = vi.spyOn(t.service.runtime, "removeEndpoint");
+      const replay = vi.mocked(PhotonChatAdapter.prototype.recoveryStream);
+      await vi.waitFor(() => expect(replay.mock.calls.length).toBeGreaterThan(0), { timeout: 5000 });
+      const originalReads = replay.mock.calls.length, originalStarts = started.length;
+      replay.mockImplementationOnce(() => new TypedEventStream((async function* () { throw source; })()));
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.waitFor(() => expect(rolledBack).toBe(true), { timeout: 5000 });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(failureWrites).toBe(1); expect(t.service.runtime.get(t.endpoint.id)).toBe(first);
+      expect(remove).not.toHaveBeenCalled();
+      const [beforeRecovery] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+      expect(beforeRecovery.status).not.toBe("attention");
+      const incoming = photonEvent(1), getMessage = t.f.client.messages.get.getMockImplementation();
+      if (!getMessage) throw new Error("normal controlled message lookup absent");
+      t.f.client.messages.get.mockImplementation(async guid => guid === incoming.message.guid ? incoming.message : getMessage(guid));
+      replay.mockImplementation(() => stream([incoming, { type: "catchup.complete", headSequence: 1 }]));
+      // The rollback was a one-shot real SQL fault. No direct failure callback,
+      // Runtime reset or manual retry schedules recovery: only its existing reader cadence.
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.waitFor(() => expect(failureWrites, "restored SQL must be retried by the stopped receiver's owned reader").toBe(2), { timeout: 5000 });
+      await vi.waitFor(() => {
+        const current = t.service.runtime.get(t.endpoint.id);
+        expect(current).not.toBeNull(); expect(current).not.toBe(first);
+      }, { timeout: 5000 });
+      await vi.waitFor(async () => expect(await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, t.endpoint.id))).toHaveLength(1), { timeout: 5000 });
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(started).toHaveLength(originalStarts + 1);
+      expect(replay).toHaveBeenCalledTimes(originalReads + 2);
+      expect(t.wakeup).not.toHaveBeenCalled(); // First normal intake remains unlinked.
+      const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+      expect(connection.enabled).toBe(true); expect(connection.credentialSecretRefs.length).toBeGreaterThan(0);
+      await vi.waitFor(() => expect(coordinator.nextWakeAt()).toBeNull(), { timeout: 5000 });
+    } catch (error) { primary = error; throw error; }
+    finally {
+      db.transaction = transaction;
+      const cleanup: unknown[] = [];
+      try { await coordinator.stop(); } catch (error) { cleanup.push(error); }
+      // Baseline failure still settles its actual debt under the same current
+      // callback before service shutdown fences that callback. This is cleanup,
+      // not the successful recovery observation asserted above.
+      for (const receiver of started) try { await receiver.close(); } catch (error) { cleanup.push(error); }
+      try { await t.service.shutdown(); } catch (error) { cleanup.push(error); }
+      vi.useRealTimers();
+      if (cleanup.length) throw new AggregateError(primary ? [primary, ...cleanup] : cleanup, "Photon failure-write recovery fixture cleanup remains owned");
+    }
+  }, 30_000);
+
+  it("settles failed local reporting through authorized pause and repeated removal without new intake", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const t = await setup(); await t.start(); await t.qualify();
+    const source = new PhotonError("network", "controlled local retirement interruption");
+    const persistence = new Error("controlled real local failure-write rollback"), lostClose = new Error("controlled stream-close reply lost");
+    const transaction = db.transaction.bind(db), replay = vi.mocked(PhotonChatAdapter.prototype.recoveryStream);
+    let armed = false, rollbacks = 0, primary: unknown;
+    db.transaction = (work, ...args) => transaction(async tx => {
+      const result = await work(tx);
+      if (armed && result && typeof result === "object" && "kind" in result && result.kind === "recorded") {
+        const [endpoint] = await tx.select({ status: chatEndpoints.status, healthMessage: chatEndpoints.healthMessage })
+          .from(chatEndpoints).where(and(eq(chatEndpoints.companyId, t.companyId), eq(chatEndpoints.id, t.endpoint.id)));
+        if (endpoint?.status === "attention" && endpoint.healthMessage === source.message) { armed = false; throw persistence; }
+      }
+      return result;
+    }, ...args).catch(error => { if (error === persistence) rollbacks++; throw error; });
+    const failIntake = async (expected: number) => {
+      armed = true;
+      replay.mockImplementationOnce(() => new TypedEventStream((async function* () { throw source; })()));
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.waitFor(() => expect(rollbacks).toBe(expected), { timeout: 5000 });
+      await new Promise<void>(resolve => setImmediate(resolve));
+    };
+    try {
+      const [before] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+      const deliveries = await db.select({ id: chatDeliveries.id }).from(chatDeliveries).where(eq(chatDeliveries.endpointId, t.endpoint.id));
+      const conversations = await t.service.listConversations(t.endpoint.id), reads = replay.mock.calls.length;
+      await failIntake(1);
+      let pauseFailure: unknown;
+      try { await t.service.configure(t.endpoint.id, { action: "pause" }, t.userId); } catch (error) { pauseFailure = error; }
+      expect(pauseFailure, "the exact durably paused local owner must settle its already-joined reporting debt").toBeUndefined();
+      expect(t.service.runtime.hasUnsettledLifecycle()).toBe(false);
+      expect(replay).toHaveBeenCalledTimes(reads + 1);
+      const [paused] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+      expect(paused).toMatchObject({ enabled: false, status: "disabled", credentialSecretRefs: before.credentialSecretRefs });
+      // Only ordinary authorized resume creates the next local owner.
+      await t.service.configure(t.endpoint.id, { action: "resume" }, t.userId);
+      await failIntake(2);
+      const owned = t.f.client.messages.subscribeEvents.mock.results.at(-1)?.value;
+      if (!owned) throw new Error("normal local subscription missing");
+      const close = owned.close.bind(owned);
+      vi.spyOn(owned, "close").mockImplementationOnce(async () => { await close(); throw lostClose; });
+      await expect(t.service.configure(t.endpoint.id, { action: "remove" }, t.userId)).rejects.toThrow(/shutdown|retirement|close/i);
+      const [held] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+      expect(held).toMatchObject({ status: "archived", enabled: false, credentialSecretRefs: before.credentialSecretRefs });
+      expect((await t.service.get(t.endpoint.id)).status).toBe("archived");
+      expect(t.service.runtime.hasUnsettledLifecycle()).toBe(true);
+      const readsBeforeRetry = replay.mock.calls.length;
+      await t.service.configure(t.endpoint.id, { action: "remove" }, t.userId);
+      expect(t.service.runtime.hasUnsettledLifecycle()).toBe(false);
+      const [removed] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+      expect(removed.credentialSecretRefs).toEqual([]);
+      expect(replay).toHaveBeenCalledTimes(readsBeforeRetry);
+      expect(await db.select({ id: chatDeliveries.id }).from(chatDeliveries).where(eq(chatDeliveries.endpointId, t.endpoint.id))).toEqual(deliveries);
+      expect((await t.service.listConversations(t.endpoint.id)).map(row => row.id)).toEqual(conversations.map(row => row.id));
+    } catch (error) { primary = error; throw error; }
+    finally {
+      db.transaction = transaction; vi.useRealTimers();
+      try { await t.service.shutdown(); }
+      catch (cleanup) {
+        // Old product retains this same real lifecycle debt after physical
+        // joins. Preserve normal teardown rejection; never fake a receipt or
+        // reset the registry, active status, credentials, or generation.
+        throw new AggregateError([...(primary ? [primary] : []), cleanup], "Photon local retirement causal failure with retained normal cleanup debt");
+      }
+    }
+  }, 30_000);
+
   it("recovers a Photon transport loss through the receiver worker and cancels fatal recovery", async () => {
     const t = await setup();
     const onError = vi.fn();
@@ -540,6 +680,111 @@ describe("iMessage Photon channel control plane", () => {
     const secretSafe = JSON.stringify(await t.service.get(t.endpoint.id));
     expect(secretSafe).not.toContain("private-line-token");
     expect(secretSafe).not.toContain('"projectSecret"');
+  }, 30_000);
+  it("restores group membership queued during pause before admitting fresh messages after resume", async () => {
+    const t = await setup();
+    await t.start();
+    await t.qualify();
+    const group = photonChat("iMessage;+;pause-membership", true);
+    t.chats.set(group.guid, group);
+    await t.deliver(photonEvent(3, group));
+    const resource = (await t.service.listResources(t.endpoint.id)).find(row => row.type === "group_chat")!;
+    expect(resource).toBeDefined();
+    await t.service.replaceResources(t.endpoint.id, [{ id: resource.id, enabled: true }], t.userId);
+    await t.deliver(photonEvent(4, group));
+    const membership = (sequence: number, type: "participantRemoved" | "participantAdded", occurredAt = new Date()): LiveEvent => ({
+      type: "group.changed", chatGuid: group.guid, sequence, occurredAt, isFromMe: false,
+      change: { type, participant: { address: "+15555550100", service: "iMessage" } },
+    });
+    await t.deliver(membership(5, "participantRemoved"));
+    const removed = (await t.service.listResources(t.endpoint.id)).find(row => row.id === resource.id)!;
+    expect(removed).toMatchObject({ enabled: true, availability: "unavailable", metadata: { photonRemoved: true } });
+    const [before] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+    const [connectionBefore] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+    await t.service.configure(t.endpoint.id, { action: "pause" }, t.userId);
+    const [paused] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+    const readded = membership(6, "participantAdded", paused.updatedAt);
+    await t.service.configure(t.endpoint.id, { action: "resume" }, t.userId);
+    const [resumed] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+    const [connectionResumed] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+    const cutoffValue = Reflect.get(resumed.setup, "photonIntakeAfter");
+    if (typeof cutoffValue !== "string") throw new Error("Missing normal resume cutoff");
+    const cutoff = Date.parse(cutoffValue);
+    expect(Number.isFinite(cutoff)).toBe(true);
+    expect(readded.occurredAt.getTime()).toBeLessThan(cutoff);
+    expect(Reflect.get(resumed.setup, "runtimeGeneration")).toBe(Reflect.get(before.setup, "runtimeGeneration"));
+    expect(resumed.connectionId).toBe(before.connectionId);
+    expect(connectionResumed.credentialSecretRefs).toEqual(connectionBefore.credentialSecretRefs);
+    const wakeups = t.wakeup.mock.calls.length;
+    const deliveries = await db.select({ id: chatDeliveries.id }).from(chatDeliveries).where(eq(chatDeliveries.endpointId, t.endpoint.id));
+    await t.deliver(readded);
+    const restored = (await t.service.listResources(t.endpoint.id)).find(row => row.id === resource.id)!;
+    expect(restored, "pause-window membership must clear the removed tombstone").toMatchObject({ enabled: true, availability: "available", metadata: { photonRemoved: false } });
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups);
+    expect(await db.select({ id: chatDeliveries.id }).from(chatDeliveries).where(eq(chatDeliveries.endpointId, t.endpoint.id))).toEqual(deliveries);
+    await t.deliver(readded);
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups);
+    await t.deliver({ ...photonEvent(7, group, "Fresh after membership restoration"), occurredAt: new Date(cutoff) });
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 1);
+    await t.deliver({ ...photonEvent(7, group, "Fresh after membership restoration"), occurredAt: new Date(cutoff) });
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 1);
+    await expect(t.callbacks().onPhotonEvent!(membership(8, "participantAdded", new Date(NaN))))
+      .rejects.toMatchObject({ code: "invalid_response" });
+    await t.service.configure(t.endpoint.id, { action: "pause" }, t.userId);
+    await expect(t.callbacks().onPhotonEvent!(membership(9, "participantAdded")))
+      .rejects.toThrow("Photon receiver no longer owns this endpoint");
+  }, 30_000);
+  it("filters pause-window events through current Photon admission after a same-generation resume", async () => {
+    const t = await setup();
+    await t.start();
+    await t.qualify();
+    const [before] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+    const [connectionBefore] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+    if (!before || !connectionBefore) throw new Error("Missing configured Photon endpoint");
+    const wakeups = t.wakeup.mock.calls.length;
+    const deliveredBefore = await db.select({ id: chatDeliveries.id }).from(chatDeliveries)
+      .where(eq(chatDeliveries.endpointId, t.endpoint.id));
+    await t.service.configure(t.endpoint.id, { action: "pause" }, t.userId);
+    const [paused] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+    if (!paused) throw new Error("Missing paused Photon endpoint");
+    const duringPause = { ...photonEvent(3, t.f.chat, "Queued while paused"), occurredAt: paused.updatedAt };
+    await t.service.configure(t.endpoint.id, { action: "resume" }, t.userId);
+    const [resumed] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, t.endpoint.id));
+    const [connectionResumed] = await db.select().from(toolConnections).where(eq(toolConnections.id, t.endpoint.connectionId));
+    if (!resumed || !connectionResumed) throw new Error("Missing resumed Photon endpoint");
+    const cutoffValue = Reflect.get(resumed.setup, "photonIntakeAfter");
+    if (typeof cutoffValue !== "string") throw new Error("Missing normal Photon resume cutoff");
+    const cutoff = Date.parse(cutoffValue);
+    expect(Number.isFinite(cutoff)).toBe(true);
+    expect(duringPause.occurredAt.getTime()).toBeLessThan(cutoff);
+    const generation = Reflect.get(before.setup, "runtimeGeneration");
+    expect(Number.isSafeInteger(generation)).toBe(true);
+    expect(Reflect.get(resumed.setup, "runtimeGeneration")).toBe(generation);
+    expect(resumed.connectionId).toBe(before.connectionId);
+    expect(connectionResumed.credentialSecretRefs).toEqual(connectionBefore.credentialSecretRefs);
+    const providerReads = t.f.client.chats.get.mock.calls.length;
+    // This is the actual normal callback used by external-owner.dispatch. The
+    // local receiver's catch-up cutoff is deliberately not the tested boundary.
+    await t.deliver(duringPause);
+    expect(t.wakeup.mock.calls.length, "pause-window input must not create useful work after resume").toBe(wakeups);
+    expect(await db.select({ id: chatDeliveries.id }).from(chatDeliveries)
+      .where(eq(chatDeliveries.endpointId, t.endpoint.id))).toEqual(deliveredBefore);
+    expect(t.f.client.chats.get).toHaveBeenCalledTimes(providerReads);
+    const boundary = { ...photonEvent(4, t.f.chat, "Exactly at the resumed boundary"), occurredAt: new Date(cutoff) };
+    await t.deliver(boundary);
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 1);
+    await t.deliver(boundary);
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 1);
+    await t.deliver({ ...photonEvent(5, t.f.chat, "Fresh after resume"), occurredAt: new Date(cutoff + 1) });
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 2);
+    await expect(t.callbacks().onPhotonEvent!({ ...photonEvent(6), occurredAt: new Date(NaN) }))
+      .rejects.toMatchObject({ code: "invalid_response" });
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 2);
+    await t.service.configure(t.endpoint.id, { action: "pause" }, t.userId);
+    // Authority still wins before timestamp validation while inactive.
+    await expect(t.callbacks().onPhotonEvent!({ ...photonEvent(7), occurredAt: new Date(NaN) }))
+      .rejects.toThrow("Photon receiver no longer owns this endpoint");
+    expect(t.wakeup).toHaveBeenCalledTimes(wakeups + 2);
   }, 30_000);
   it("preserves DM identity across restart, ignores echoes, and reserves a paused number", async () => {
     const t = await setup();
