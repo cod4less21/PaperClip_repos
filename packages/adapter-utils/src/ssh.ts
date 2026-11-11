@@ -727,6 +727,9 @@ async function streamSshToLocalFile(input: {
 
     let sshStderr = "";
     let settled = false;
+    let sshClosed = false;
+    let sinkFinished = false;
+    let sshExitCode: number | null = null;
 
     const fail = (error: Error) => {
       if (settled) return;
@@ -736,6 +739,20 @@ async function streamSshToLocalFile(input: {
       reject(error);
     };
 
+    const settle = () => {
+      if (settled || !sshClosed || !sinkFinished) return;
+      settled = true;
+      if ((sshExitCode ?? 0) !== 0) {
+        reject(new Error(sshStderr.trim() || `ssh exited with code ${sshExitCode ?? -1}`));
+        return;
+      }
+      resolve();
+    };
+
+    sink.on("finish", () => {
+      sinkFinished = true;
+      settle();
+    });
     if (input.progress) {
       input.progress.counter.on("error", fail);
       ssh.stdout?.pipe(input.progress.counter).pipe(sink);
@@ -748,15 +765,13 @@ async function streamSshToLocalFile(input: {
     ssh.on("error", fail);
     sink.on("error", fail);
     ssh.on("close", (code) => {
-      sink.end(() => {
-        if (settled) return;
-        settled = true;
-        if ((code ?? 0) !== 0) {
-          reject(new Error(sshStderr.trim() || `ssh exited with code ${code ?? -1}`));
-          return;
-        }
-        resolve();
-      });
+      sshExitCode = code;
+      sshClosed = true;
+      if (ssh.stdout && !ssh.stdout.readableEnded) {
+        fail(new Error(sshStderr.trim() || `ssh output closed before the end (exit code ${code ?? -1})`));
+        return;
+      }
+      settle();
     });
   }).finally(auth.cleanup);
 }
