@@ -1078,8 +1078,9 @@ type TerminalBlockerFacts = {
  * What a human needs in order to act on a terminal blocker: its status,
  * assignee, and the unblock step its owner recorded. A card that only says
  * "needs human attention" leaves the operator guessing why it was raised.
+ * Facts are read through the viewer's read condition, like the card subject.
  */
-async function terminalBlockerFactsMap(db: Db, companyId: string, issueIds: string[]) {
+async function terminalBlockerFactsMap(db: Db, companyId: string, issueIds: string[], readCondition: SQL<boolean>) {
   const facts = new Map<string, TerminalBlockerFacts>();
   const ids = [...new Set(issueIds)];
   if (ids.length === 0) return facts;
@@ -1102,7 +1103,7 @@ async function terminalBlockerFactsMap(db: Db, companyId: string, issueIds: stri
         monitorNextCheckAt: issues.monitorNextCheckAt,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), inArray(issues.id, chunk))));
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, chunk), readCondition)));
   }
   const ownerAgentId = (row: (typeof rows)[number]) => {
     const owner = row.status === "blocked" ? row.unblockDescriptor?.owner : null;
@@ -1700,7 +1701,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       const terminalIds = [...terminalCandidates.keys()];
       const [blockedWork, terminalFacts] = await Promise.all([
         blockedWorkMap(db, companyId, terminalIds),
-        terminalBlockerFactsMap(db, companyId, terminalIds),
+        terminalBlockerFactsMap(db, companyId, terminalIds, readCondition),
       ]);
       for (const [terminalIssueId, candidate] of terminalCandidates) {
         const blockedTaskCount = new Set([
