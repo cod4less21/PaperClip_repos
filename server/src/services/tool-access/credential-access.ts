@@ -39,6 +39,35 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
     connection: typeof toolConnections.$inferSelect,
     actor?: ActorInfo,
   ): Promise<typeof connectionGrants.$inferSelect | null> {
+    if (connection.credentialPolicy === "per_agent") {
+      const actorAgentId =
+        actor?.actorType === "agent" ? (actor.actorId ?? null) : null;
+      const dedicated =
+        actor?.actorType === "plugin" ||
+        (actor?.actorType === "agent" && !actorAgentId)
+          ? []
+          : await db
+              .select()
+              .from(connectionGrants)
+              .where(
+                and(
+                  eq(connectionGrants.companyId, connection.companyId),
+                  eq(connectionGrants.connectionId, connection.id),
+                  eq(connectionGrants.kind, "agent"),
+                  eq(connectionGrants.status, "active"),
+                  ...(actorAgentId
+                    ? [eq(connectionGrants.subjectAgentId, actorAgentId)]
+                    : []),
+                ),
+              )
+              .limit(2);
+      if (dedicated.length === 1) return dedicated[0]!;
+      throw unprocessable("This agent's dedicated authorization is required", {
+        code: "agent_authorization_required",
+        setupUrl: connectionSetupUrl(connection),
+        reconnectUrl: connectionReconnectUrl(connection),
+      });
+    }
     const actorUserId =
       connectionActorUserId(actor);
     if (actorUserId) {
