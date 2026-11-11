@@ -8442,6 +8442,7 @@ export function nativeSessionFailureDisposition(
     sourceFailureCode === "native_session_cleanup_quarantined" ||
     sourceFailureCode === "native_adopted_runner_authentication_timeout" ||
     sourceFailureCode === "native_provider_usage_limit" ||
+    sourceFailureCode === "native_command_payload_too_large" ||
     sourceFailureCode === NATIVE_PROVIDER_SESSION_CLOSED;
   const permissionDeclined = sourceFailureCode === "native_permission_declined";
   const exhausted = permanentFailure || permissionDeclined || attempt >= 3;
@@ -8548,6 +8549,7 @@ export function nativeSessionFailureSourceCode(
   | "runner_ingress_access_rejected"
   | "runner_ingress_acquisition_failed"
   | "local_runtime_api_listener_unavailable"
+  | "native_command_payload_too_large"
   | "native_session_interrupted" {
   if (error instanceof NativePermissionDeclinedError) return "native_permission_declined";
   if (error instanceof NativeGovernedWaitSettlementPendingError) return "native_governed_wait_settlement_pending";
@@ -8627,6 +8629,9 @@ export function nativeSessionFailureSourceCode(
   }
   if (/provider_frame_too_large|stdout frame exceeded/i.test(message)) {
     return "provider_frame_too_large";
+  }
+  if (/command_payload_too_large/i.test(message)) {
+    return "native_command_payload_too_large";
   }
   if (
     /provider_transport_failed|invalid JSON-RPC|provider failed/i.test(message)
@@ -12718,6 +12723,8 @@ async function executePaperclipNativeSessionAttempt(
                 ? NATIVE_PROVIDER_STATE_INCOMPATIBLE_ACTION
               : sourceFailureCode === NATIVE_PROVIDER_SIDE_EFFECT_PENDING
                 ? NATIVE_PROVIDER_SIDE_EFFECT_PENDING_ACTION
+                : sourceFailureCode === "native_command_payload_too_large"
+                  ? "The persisted command exceeds the durable journal size bound; rebuilding the same command always fails. Shrink the command input or context, then explicitly retry."
                 : recoveryEvidence.recoveryMode === "ambiguous_state"
                   ? "Inspect the original provider failure and explicitly resolve the ambiguous session state; do not open a replacement provider session."
                   : integrityFailure
