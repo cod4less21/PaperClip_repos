@@ -12,6 +12,11 @@ export interface LocalEnvironmentConfig {
 }
 
 export interface SshEnvironmentConfig {
+  network?: "direct" | "tailscale";
+  tailscaleAuthKey?: string | null;
+  tailscaleAuthKeySecretRef?: EnvSecretRefBinding | null;
+  tailscaleSocket?: string;
+  tailscaleIdentity?: string;
   host: string;
   port: number;
   username: string;
