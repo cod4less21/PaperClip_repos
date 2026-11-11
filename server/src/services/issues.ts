@@ -58,6 +58,7 @@ import { loadRunBoundIssue } from "./issue-creation-source.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
 import type { ExecutionProjection } from "@paperclipai/shared";
 import type { IssueParentAdjustment } from "@paperclipai/shared";
+import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 import {
   confirmPlacement,
   planIssueParentChange,
@@ -4156,6 +4157,33 @@ async function readIssueBlockerAttentionBatch(
     }
   }
 
+  // A wake run for a node may be queued behind the agent's other work before
+  // it becomes the node's executionRunId (for example the wake that follows a
+  // child's completion). Count a not-yet-started run for the node's current
+  // assignee. A running run the node no longer owns stays stale.
+  const runProvenanceIssueId = sql<string>`coalesce(
+    ${heartbeatRuns.nativeIssueId}::text,
+    nullif(${heartbeatRuns.contextSnapshot}->>'issueId', ''),
+    nullif(${heartbeatRuns.contextSnapshot}->>'taskId', ''),
+    nullif(${heartbeatRuns.contextSnapshot}->>'taskKey', '')
+  )`;
+  const openAssignedNodes = [...evidenceNodes.values()].filter((node) => node.status !== "done" && node.assigneeAgentId);
+  for (const chunk of chunkList(openAssignedNodes.map((node) => node.id), ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE)) {
+    const runRows: Array<{ agentId: string; issueId: string | null; provenanceIssueId: string | null }> = await dbOrTx
+      .select({ agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, provenanceIssueId: runProvenanceIssueId })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        eq(heartbeatRuns.status, "queued"),
+        or(inArray(heartbeatRuns.issueId, chunk), inArray(runProvenanceIssueId, chunk)),
+      ));
+    for (const row of runRows) {
+      for (const id of new Set([row.issueId, row.provenanceIssueId])) {
+        if (id && evidenceNodes.get(id)?.assigneeAgentId === row.agentId) activeIssueIds.add(id);
+      }
+    }
+  }
+
   const explicitWaitCandidateIds = [...evidenceNodes.values()]
     .filter((node) => node.status !== "done")
     .map((node) => node.id);
@@ -4313,12 +4341,45 @@ async function readIssueBlockerAttentionBatch(
     }
   }
 
+  // A blocked issue whose unblockDescriptor names an agent owner, and whose
+  // owner was woken with the unblock action for this blocked transition
+  // (blockedOwnerNotifiedAt, see routable-blocked.ts), has been routed to that
+  // agent. Treat it as a waiting path while the owner can still be invoked, so
+  // the board is not asked to act on work an agent has taken responsibility
+  // for. Without delivery evidence the owner may never have been told, so the
+  // issue keeps surfacing.
+  const agentUnblockOwnerByIssueId = new Map<string, string>();
+  for (const chunk of chunkList(explicitWaitCandidateIds, ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE)) {
+    const descriptorRows: Array<{ id: string; unblockDescriptor: IssueUnblockDescriptor | null }> = await dbOrTx
+      .select({ id: issues.id, unblockDescriptor: issues.unblockDescriptor })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        inArray(issues.id, chunk),
+        eq(issues.status, "blocked"),
+        isNotNull(issues.unblockDescriptor),
+        isNotNull(issues.blockedOwnerNotifiedAt),
+      ));
+    for (const row of descriptorRows) {
+      const owner = row.unblockDescriptor?.owner;
+      if (!owner || typeof owner !== "object" || !("agentId" in owner) || typeof owner.agentId !== "string") continue;
+      agentUnblockOwnerByIssueId.set(row.id, owner.agentId);
+      agentIds.add(owner.agentId);
+    }
+  }
+
   const agentRows: IssueBlockerAttentionAgentRow[] = [];
   for (const chunk of chunkList([...agentIds], ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE)) {
     agentRows.push(...await dbOrTx.select({ id: agents.id, companyId: agents.companyId, status: agents.status })
       .from(agents).where(and(eq(agents.companyId, companyId), inArray(agents.id, chunk))));
   }
   const agentsById = new Map(agentRows.map((agent) => [agent.id, agent]));
+  for (const [issueId, ownerAgentId] of agentUnblockOwnerByIssueId) {
+    const owner = agentsById.get(ownerAgentId);
+    if (owner?.companyId === companyId && BLOCKER_ATTENTION_INVOKABLE_AGENT_STATUSES.has(owner.status)) {
+      explicitWaitingIssueIds.add(issueId);
+    }
+  }
 
   type PathClassification = {
     covered: boolean;
@@ -4538,23 +4599,32 @@ async function readIssueBlockerAttentionBatch(
     return null;
   };
 
-  for (const root of roots) {
-    const traversal = traversals.get(root.id)!;
-    const topLevelEdges = (edgesByIssueId.get(root.id) ?? []).filter((edge) => {
+  const unresolvedTopLevelEdges = (rootId: string) =>
+    (edgesByIssueId.get(rootId) ?? []).filter((edge) => {
       const blocker = nodesById.get(edge.blockerIssueId);
       return (
         blocker?.status !== "done" ||
         pendingFinalizeBlockerIssueIds.has(edge.blockerIssueId)
       );
     });
+  for (const root of roots) {
+    const traversal = traversals.get(root.id)!;
+    const topLevelEdges = unresolvedTopLevelEdges(root.id);
     if (topLevelEdges.length === 0) {
+      // With no open blocker the issue's own waiting path decides, with the
+      // same evidence the blocker walk uses: a pending interaction or
+      // approval, a healthy recovery, a routed agent unblock owner, a live
+      // execution run, a queued run for its assignee, or a pending wake.
+      const rootHasWaitingPath = explicitWaitingIssueIds.has(root.id) || activeIssueIds.has(root.id);
       attentionMap.set(
         root.id,
-        createIssueBlockerAttention({
-          state: "needs_attention",
-          reason: "attention_required",
-          terminalBlockerIssueId: root.id,
-        }),
+        rootHasWaitingPath
+          ? createIssueBlockerAttention({ state: "covered", reason: null, blockingTreeLive: true })
+          : createIssueBlockerAttention({
+            state: "needs_attention",
+            reason: "attention_required",
+            terminalBlockerIssueId: root.id,
+          }),
       );
       continue;
     }
@@ -11615,6 +11685,14 @@ export function issueService(db: Db) {
       ) {
         patch.unblockDescriptor = null;
         patch.blockedTransitionAt = null;
+        patch.blockedOwnerNotifiedAt = null;
+      } else if (
+        existing.status === "blocked" &&
+        issueData.unblockDescriptor !== undefined &&
+        !isDeepStrictEqual(issueData.unblockDescriptor?.owner ?? null, existing.unblockDescriptor?.owner ?? null)
+      ) {
+        // The new owner was not woken for this blocked transition. Clear the
+        // delivery evidence so blocker attention keeps surfacing the issue.
         patch.blockedOwnerNotifiedAt = null;
       }
       if (issueData.requestDepth !== undefined) {
