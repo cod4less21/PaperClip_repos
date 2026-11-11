@@ -2086,6 +2086,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       agentId: stringOrNull(rawActor?.agentId),
       runId: stringOrNull(rawActor?.runId),
       companyId: stringOrNull(rawActor?.companyId),
+      authenticationSource: stringOrNull(rawActor?.authenticationSource),
     });
     return Object.freeze({
       actor,
