@@ -17,7 +17,6 @@ import { createOwnedSandbox, recoverSandboxCreations, recoverablePluginCreation 
 import { dueRunLeaseReleaseCondition, pendingRunLeaseReleaseCondition } from "./environment-lease-release-state.js";
 import { flushDeferredEnvironmentCleanup, registerDeferredEnvironmentCleanup, writeEnvironmentCleanup } from "./environment-cleanup-notifications.js";
 import { executeEnvironmentTask, pluginEnvironmentSupportsTasks, settleDispatchedEnvironmentTask } from "./environment-task-runtime.js";
-import type { PluginEnvironmentTaskOperation } from "@paperclipai/plugin-sdk";
 import { allowLegacyShutdownWorkspaceCleanup, legacyShutdownWorkspaceResourceProtected } from "./legacy-shutdown-workspace-settlement.js";
 import { nativeWorkspaceExportPendingForLease, nativeWorkspaceExportPendingForResource } from "./native-runtime/native-workspace-finalization-state.js";
 import { beginIdleTrackedWork } from "./task-admission.js";
@@ -481,6 +480,7 @@ export interface EnvironmentDriverAcquireInput {
   executionWorkspaceMode: ExecutionWorkspace["mode"] | null;
   executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
   runnerTaskProjectIds?: readonly string[];
+  runnerTaskResumeSessionId?: string | null;
   /**
    * The harness/adapter type for this run (the agent's adapter). Drivers that
    * materialize a per-run sandbox use it to select the runtime image so a single
@@ -3450,14 +3450,23 @@ function createPluginEnvironmentDriver(
         sql`${environmentLeases.metadata}->>'agentId' = ${input.agentId!}`,
         sql`${environmentLeases.metadata}->>'pluginId' = ${plugin.id}`,
         sql`${environmentLeases.metadata}->>'driverKey' = ${parsed.config.driverKey}`,
+        sql`${environmentLeases.metadata}->'portableTaskSuccessor' is null`,
       )) : [];
       if (candidates.length > 1) throw new Error("Ambiguous retained plugin task ownership");
       const previous = candidates[0];
+      const previousSessionId = (previous?.metadata?.runnerTaskIdentity as { sessionId?: unknown } | undefined)?.sessionId;
+      const freshPortableSession = driver.sessionHandoffVersion === 1 && input.runnerTaskResumeSessionId !== undefined &&
+        (input.runnerTaskResumeSessionId === null || input.runnerTaskResumeSessionId !== previousSessionId);
+      const handoffPrevious = !freshPortableSession && driver.sessionHandoffVersion === 1 && previous?.providerLeaseId &&
+        previous.metadata?.runnerTaskFingerprint === fingerprint &&
+        typeof (previous.metadata?.providerMetadata as { ownershipGeneration?: unknown } | undefined)?.ownershipGeneration === "string"
+        ? previous : undefined;
       let resumed: PluginEnvironmentLease | undefined;
-      if (previous?.providerLeaseId && previous.metadata?.runnerTaskFingerprint !== fingerprint) {
-        // A changed mount scope must retire the old process before checkpoint recovery.
+      if (!handoffPrevious && previous?.providerLeaseId &&
+          (freshPortableSession || previous.metadata?.runnerTaskFingerprint !== fingerprint)) {
+        // A fresh logical session or changed mount scope must retire the old process before provisioning.
         await this.releaseRunLease({environment:input.environment,lease:toEnvironmentLeaseSnapshot(previous),status:"released"});
-      } else if (previous?.providerLeaseId) {
+      } else if (!handoffPrevious && previous?.providerLeaseId) {
         // Resume only inspects the exact computer; an unavailable reply must not create a replacement.
         resumed = await workerManager.call(plugin.id, "environmentResumeLease", {
           driverKey: parsed.config.driverKey, companyId: input.companyId, environmentId: input.environment.id,
@@ -3516,6 +3525,7 @@ function createPluginEnvironmentDriver(
           ...(warm ? {runnerTaskProjectIds:[...input.runnerTaskProjectIds ?? []]} : {}),remoteCwd:".",
           ...(input.agentId ? { agentId: input.agentId } : {}),
           providerMetadata: providerLease.metadata ?? {},
+          ...(handoffPrevious ? { portableTaskPreviousLeaseId: handoffPrevious.id } : {}),
           ...(input.purpose ? { purpose: input.purpose, loginCommandKey: input.loginCommandKey } : {}),
           environmentId: input.environment.id,
           ...(input.purpose !== "login" && input.adapterType === "paperclip_runner" && driver.supportsTasks === true ? { runnerTaskLease: true } : {}),
@@ -3921,7 +3931,7 @@ export function environmentRuntimeService(
     },
 
     /** Dispatch plugin-provided Runner execution, including resource preparation and task lifecycle. */
-    async task(input: { companyId: string; leaseId: string; operation: PluginEnvironmentTaskOperation; executionContext?: unknown; expectedTaskId?: string }) {
+    async task(input: Parameters<typeof executeEnvironmentTask>[2]) {
       if (!options.pluginWorkerManager) throw new Error("Plugin-provided Runner execution worker manager unavailable");
       return executeEnvironmentTask(db, options.pluginWorkerManager, input);
     },
@@ -3940,6 +3950,7 @@ export function environmentRuntimeService(
       persistedExecutionWorkspace: Pick<ExecutionWorkspace, "id" | "mode"> | null;
       executionWorkspaceSettings?: IssueExecutionWorkspaceSettings | null;
       runnerTaskProjectIds?: readonly string[];
+      runnerTaskResumeSessionId?: string | null;
       /** The agent's adapter type for this run (mixed-harness environments). */
       adapterType?: string | null;
       resolveSnapshotIdentity?: boolean;
@@ -3985,6 +3996,7 @@ export function environmentRuntimeService(
         executionWorkspaceMode: leaseContext.executionWorkspaceMode,
         executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
         runnerTaskProjectIds: input.runnerTaskProjectIds,
+        runnerTaskResumeSessionId: input.runnerTaskResumeSessionId,
         purpose: input.purpose,
         loginCommandKey: input.loginCommandKey,
         adapterType: input.adapterType ?? null,

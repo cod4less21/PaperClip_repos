@@ -308,6 +308,7 @@ export function environmentRunOrchestrator(
     persistedExecutionWorkspace: Pick<ExecutionWorkspace, "id" | "mode"> | null;
     executionWorkspaceSettings: IssueExecutionWorkspaceSettings | null;
     runnerTaskProjectIds?: readonly string[];
+    runnerTaskResumeSessionId?: string | null;
     /** Existing live runner recovery must use its original active lease, including ephemeral leases. */
     reattachRemoteLease?: { kind?: "sandbox"; leaseId: string; providerLeaseId: string; remoteCwd: string }
       | { kind: "plugin_task"; leaseId: string };
@@ -365,6 +366,7 @@ export function environmentRunOrchestrator(
       persistedExecutionWorkspace: input.persistedExecutionWorkspace,
       executionWorkspaceSettings: input.executionWorkspaceSettings,
       runnerTaskProjectIds: input.runnerTaskProjectIds,
+      runnerTaskResumeSessionId: input.runnerTaskResumeSessionId,
       adapterType: input.adapterType ?? null,
       warmRunnerIdleTimeoutMs,
       runnerReconnectGraceMs,
@@ -483,6 +485,7 @@ export function environmentRunOrchestrator(
     effectiveExecutionWorkspaceMode: string | null;
     persistedExecutionWorkspace: ExecutionWorkspace | null;
     runnerTaskProjectIds?: readonly string[];
+    signal?: AbortSignal;
     assertOwned?: () => Promise<void>;
     /**
      * The host duplex observability recorder for this run. The orchestrator threads
@@ -719,6 +722,7 @@ export function environmentRunOrchestrator(
         leaseMetadata: (lease.metadata as Record<string, unknown> | null) ?? null,
         lease,
         environmentRuntime,
+        signal: input.signal,
         duplexObservabilityRecorder: input.duplexObservabilityRecorder ?? null,
       });
       // The native plugin task bridge owns guest paths. Never fall back to host execution.

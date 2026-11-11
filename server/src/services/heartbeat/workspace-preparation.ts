@@ -104,6 +104,7 @@ const RETAINED_SANDBOX_GONE = new RegExp(`^${NATIVE_REMOTE_RECOVERY_LEASE_MISMAT
 
 /** Prepares the workspace and environment; dispatch and terminal lease release stay with the caller. */
 export interface HeartbeatWorkspacePreparationInput {
+  signal?: AbortSignal;
   run: typeof heartbeatRuns.$inferSelect;
   agent: typeof agents.$inferSelect;
   task: {
@@ -145,6 +146,7 @@ export interface HeartbeatWorkspacePreparationInput {
     configSnapshot: WorkspaceMetadataInput["configSnapshot"];
     secretManifest: WorkspaceMetadataInput["secretManifest"];
     managedAiCredentialIdentity?: string;
+    runnerTaskResumeSessionId?: string | null;
   };
   reuse: {
     requestedShouldReuseExisting: boolean;
@@ -1340,6 +1342,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       adapterConfig: parseObject(agent.adapterConfig),
       admittedLifecycleMode: persistedNativeExecutionInput?.session.lifecyclePolicy.mode,
       managedAiCredentialIdentity: input.config.managedAiCredentialIdentity,
+      runnerTaskResumeSessionId: input.config.runnerTaskResumeSessionId,
       runnerTaskProjectIds:[...new Set([executionWorkspace.projectId,...resolvedWorkspace.runnerTaskProjectIds ?? [],
         ...(executionWorkspace.additionalWorkspaces ?? []).map(workspace=>workspace.projectId)]
         .filter((id):id is string=>Boolean(id)))],
@@ -1441,6 +1444,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
       effectiveExecutionWorkspaceMode,
       persistedExecutionWorkspace,
       runnerTaskProjectIds: resolvedWorkspace.runnerTaskProjectIds,
+      ...(input.signal ? { signal: input.signal } : {}),
       assertOwned: remoteAuthority ? assertRemotePreparationOwned : controllerLease.assertOwned,
       duplexObservabilityRecorder,
     }));

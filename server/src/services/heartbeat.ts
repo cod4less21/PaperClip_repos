@@ -2871,7 +2871,7 @@ export function heartbeatService(
         executionTarget,
         workspaceRestoreSource,
       } = await timePreparation("workspace", () => prepareHeartbeatWorkspace(db, {
-        run, agent, controllerLease, nativeRunnerPreparationSpans,
+        run, agent, controllerLease, nativeRunnerPreparationSpans, signal: executionControl.controller.signal,
         task: {
           issueRef,
           issueId,
@@ -2906,6 +2906,7 @@ export function heartbeatService(
           configSnapshot,
           secretManifest,
           managedAiCredentialIdentity: managedAiRuntime?.identity,
+          runnerTaskResumeSessionId: run.nativeSessionId ?? preparedSession.taskResumeSessionId,
         },
         reuse: {
           requestedShouldReuseExisting,
@@ -3266,7 +3267,7 @@ export function heartbeatService(
         context.projectId = executionWorkspace.projectId;
       }
       const {
-        previousSessionDisplayId, runtimeSessionParamsForAdapter, taskSessionCredentialCompatible, runtimeForAdapter, configFreshnessResultMetadata, sessionCompaction,
+        previousSessionDisplayId, runtimeSessionParamsForAdapter, runtimeForAdapter, configFreshnessResultMetadata, sessionCompaction,
       } = await resolveHeartbeatAdapterSession({
         agent,
         task: { context, taskKey, issueId, continuationSummary, executionContinuation },
@@ -3478,9 +3479,7 @@ export function heartbeatService(
           session: {
             persistedNativeExecutionInput,
             persistedRunnerProfile,
-            taskSessionCredentialCompatible,
-            taskSessionDecodedParams,
-            taskSessionForRun,
+            taskResumeSessionId: preparedSession.taskResumeSessionId,
             isFailedChatRunRetry,
             getFreshSessionHandoff,
           },
