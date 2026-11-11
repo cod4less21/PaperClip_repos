@@ -1022,6 +1022,19 @@ export function secretService(db: Db | DbTransaction) {
       .then((rows) => rows[0] ?? null);
   }
 
+  async function getByNames(companyId: string, names: readonly string[]) {
+    if (names.length === 0) return [];
+    return db
+      .select()
+      .from(companySecrets)
+      .where(and(
+        eq(companySecrets.companyId, companyId),
+        eq(companySecrets.scope, "company"),
+        inArray(companySecrets.name, [...names]),
+        ne(companySecrets.status, "deleted"),
+      ));
+  }
+
   async function getUserSecretDefinitionById(
     companyId: string,
     definitionId: string,
@@ -4650,6 +4663,7 @@ export function secretService(db: Db | DbTransaction) {
 
     getById,
     getByName,
+    getByNames,
     getByKey,
     resolveSecretValue,
     resolveSecretVersion,
