@@ -1159,7 +1159,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     reason = "Cancelled by control plane",
     options: CancelRunOptions = {},
   ) {
-    return cancelRun(runId, reason, options);
+    const { run } = await cancelRunWithOutcomeInternal(runId, reason, options);
+    return run;
   }
 
   async function acknowledgeBudgetCancellation(run: typeof heartbeatRuns.$inferSelect, terminationProof?: string) {
@@ -1234,9 +1235,23 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     options: CancelRunOptions,
     committedBudgetCancellation = false,
   ) {
+    const { run } = await cancelRunWithOutcomeInternal(runId, reason, options, committedBudgetCancellation);
+    return run;
+  }
+
+  async function cancelRunWithOutcomeInternal(
+    runId: string,
+    reason = "Cancelled by control plane",
+    options: CancelRunOptions = {},
+    committedBudgetCancellation = false,
+  ): Promise<{
+    run: typeof heartbeatRuns.$inferSelect | null;
+    updated: boolean;
+    causedCancellation?: boolean;
+  }> {
     let run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
-    if (options.expectedStatus && run.status !== options.expectedStatus) return null;
+    if (options.expectedStatus && run.status !== options.expectedStatus) return { run: null, updated: false };
 
 
     const attribution = {
@@ -1327,7 +1342,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         }
       }
       publications.forEach(publishActivity);
-      if (!supersessionApplied) return null;
+      if (!supersessionApplied) return { run: null, updated: false };
     }
     if (options.cancellationRequestId && !cancellationClaimed) {
       run = await claimCancellationRequest(db, runId, run.companyId, options.cancellationRequestId, options.cancellationRequestedByUserId ?? null);
@@ -1364,7 +1379,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         }
         await acknowledgeBudgetCancellation(run, terminationProof);
       }
-      return run;
+      return { run, updated: false };
     }
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
@@ -1378,7 +1393,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       await pendingProcessCancellation.settled;
       if (pendingProcessCancellation.failed)
         throw pendingProcessCancellation.error;
-      return getRun(run.id);
+      return { run: await getRun(run.id), updated: false };
     }
     const running = runningProcesses.get(run.id);
     const stopOwnership =
@@ -1416,7 +1431,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       }
       if (!fenced) {
         stopOwnership?.release();
-        return options.expectedStatus ? null : getRun(runId);
+        return { run: options.expectedStatus ? null : await getRun(runId), updated: false };
       }
       run = fenced;
     }
@@ -1453,7 +1468,11 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         );
       }
       const stopRequestedAt = Date.now();
-      const cancellation = await (async () => {
+      const cancellation: {
+        run: typeof heartbeatRuns.$inferSelect | null;
+        updated: boolean;
+        causedCancellation?: boolean;
+      } = await (async () => {
         try {
           if (control) {
             await db
@@ -1562,7 +1581,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
               // The owned adapter already finalized this run and its lifecycle.
               // Do not replay the process cancellation side effects below.
               await acknowledgeBudgetCancellation(stopped);
-              return { run: stopped, updated: false };
+              return { run: stopped, updated: false, causedCancellation: true };
             }
           }
 
@@ -1685,7 +1704,11 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         });
         await startNextQueuedRunForAgent(run.agentId);
       }
-      return cancelled;
+      return {
+        run: cancelled,
+        updated: cancellation.updated,
+        causedCancellation: cancellation.causedCancellation,
+      };
     } finally {
       stopOwnership?.release();
     }
@@ -1706,9 +1729,17 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         ),
       );
 
-    for (const run of runs) await cancelRunInternal(run.id, reason, { errorCode });
+    let runsCancelled = 0;
+    for (const run of runs) {
+      const { updated, causedCancellation } = await cancelRunWithOutcomeInternal(
+        run.id,
+        reason,
+        { errorCode },
+      );
+      if (updated || causedCancellation) runsCancelled += 1;
+    }
 
-    return runs.length;
+    return runsCancelled;
   }
 
   async function cancelPendingWakeupsForAgentsInternal(
