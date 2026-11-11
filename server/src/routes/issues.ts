@@ -15253,6 +15253,9 @@ export function issueRoutes(
       const monitorChanged =
         monitorPoliciesEqual(previousExecutionPolicy, nextExecutionPolicy) ===
         false;
+      const monitorPresentInBody =
+        req.body.executionPolicy !== undefined &&
+        normalizeIssueExecutionPolicy(req.body.executionPolicy)?.monitor != null;
       await assertCanManageIssueMonitor(
         access,
         req,
@@ -15285,8 +15288,7 @@ export function issueRoutes(
         allowBoardOverride: req.actor.type === "board" && req.actor.source !== "mcp_oauth",
         commentBody,
         reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
-        monitorExplicitlyUpdated:
-          req.body.executionPolicy !== undefined && monitorChanged,
+        monitorExplicitlyUpdated: monitorPresentInBody || monitorChanged,
       });
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
