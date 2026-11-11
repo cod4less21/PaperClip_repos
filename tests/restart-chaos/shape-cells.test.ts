@@ -214,6 +214,24 @@ describe("K15 staging deploy shape", () => {
     expect(() => parseK15DeployShape({ env: "daytona", faults: ["K15"] }, "2-3", false)).toThrow("between 5 and 600");
   });
 
+  it("runs volume-free servers only on Daytona with the wave's object store", () => {
+    const image = `ghcr.io/x/y@sha256:${"a".repeat(64)}`;
+    expect(wave(["--env", "daytona", "--daytona-image", image, "--storage", "s3", "--ephemeral-server", "--faults", "K15", "--k15-fresh-home"]))
+      .toMatchObject({ ephemeralServer: true, storage: "s3", k15FreshHome: true });
+    expect(wave(["--env", "daytona", "--daytona-image", image])).not.toHaveProperty("ephemeralServer");
+    expect(wave(["--env", "daytona", "--daytona-image", image, "--storage", "s3", "--ephemeral-server"]).workloads.every(workload => !workloadDefinitions[workload].usesRepository)).toBe(true);
+    expect(workloadDefinitions.W2.startComment?.("n1")).toContain("CHAOS-n1");
+    expect(workloadDefinitions.W2C.startComment).toBeDefined();
+    expect(workloadDefinitions.W2Q.startComment).toBeUndefined();
+    expect(wave(["--env", "daytona", "--daytona-image", image, "--faults", "K15", "--k15-fresh-home"]))
+      .toMatchObject({ ephemeralServer: true, storage: "s3", k15FreshHome: true });
+    expect(() => wave(["--env", "daytona", "--daytona-image", image, "--storage", "local", "--faults", "K15", "--k15-fresh-home"]))
+      .toThrow("--k15-fresh-home");
+    expect(() => wave(["--env", "daytona", "--daytona-image", image, "--ephemeral-server"])).toThrow("--storage s3");
+    expect(() => wave(["--env", "local", "--storage", "s3", "--ephemeral-server"])).toThrow("--env daytona");
+    expect(() => wave(["--env", "daytona", "--daytona-image", image, "--storage", "s3", "--ephemeral-server", "--workloads", "A1,B1"])).toThrow("B1");
+  });
+
   it("drops the volume variables for a fresh home, and gives each generation its own home", () => {
     const identity = redeployIdentity("w-20261111T000000-s1", 1);
     expect(redeployEnvironment(identity, "/tmp/home")).toMatchObject({ RAILWAY_VOLUME_MOUNT_PATH: "/tmp/home" });
