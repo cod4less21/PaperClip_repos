@@ -43,6 +43,7 @@ import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInT
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isUnstartedTaskQuestionAnswer } from "../../../services/unstarted-task-question-answer.js";
 import { isVerifiedDependencyInteractionResponse } from "../../../services/queued-interaction-response.js";
+import { isVerifiedPendingAddresseeInteraction } from "../../../services/pending-addressee-interaction.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { notifyChatRunMilestones } from "../../../services/chat-run-milestone-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
@@ -502,8 +503,10 @@ export function createPostgresRunDispatchAdapter(
       : false;
     const responseAdmitted = readiness && !readiness.isDependencyReady
       && input.contextSnapshot.dependencyBlockedInteraction === true
-      && await isVerifiedDependencyInteractionResponse(dbOrTx, { companyId: input.companyId,
-        issueId, agentId: input.agentId, context: input.contextSnapshot });
+      && (await isVerifiedDependencyInteractionResponse(dbOrTx, { companyId: input.companyId,
+        issueId, agentId: input.agentId, context: input.contextSnapshot })
+        || await isVerifiedPendingAddresseeInteraction(dbOrTx, { companyId: input.companyId,
+          issueId, agentId: input.agentId, context: input.contextSnapshot }));
     facts.dependenciesBlocked =
       readiness && !readiness.isDependencyReady && !stallAdmitted && !responseAdmitted
         ? {
