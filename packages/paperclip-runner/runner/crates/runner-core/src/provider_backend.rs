@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::codex_provider::{
-    CodexProvider, CodexProviderConfig, CodexProviderEvent, CodexSkillInput, CodexTurnOptions,
-    ProviderStartupObservation, ProviderStartupStage, RejectedAcceptedTurn,
+    CodexProvider, CodexProviderConfig, CodexProviderEvent, CodexSkillInput, CodexStartupHandshake,
+    CodexTurnOptions, ProviderStartupObservation, ProviderStartupStage, RejectedAcceptedTurn,
     MAX_SETTLED_PROVIDER_TURN_IDS,
 };
 use crate::codex_usage::CodexRunUsage;
@@ -35,6 +35,9 @@ use crate::provider_events::{
     normalized_codex_terminal_event_type, with_terminal_outcome, NormalizedProviderEvent,
 };
 use crate::stable_identity::{is_stable_id, DURABLE_STABLE_ID_CHARS, SHORT_STABLE_ID_CHARS};
+
+#[path = "codex_early_start.rs"]
+mod early_start;
 
 const PROVIDER_STATE_SCHEMA: &str = "paperclip.runner.codex-provider-state.v1";
 pub const CODEX_PROVIDER_STATE_FILE: &str = "codex-provider-state.json";
@@ -2023,6 +2026,7 @@ pub struct CodexCommandExecutor {
     cursor_cloud_launch_profile: Option<CursorCloudLaunchProfile>,
     startup_command: Option<ProviderStartupCommand>,
     startup_evidence_error: Option<DurableRunnerError>,
+    early_provider: Option<early_start::EarlyCodexProvider>,
     recovery_pending_effects: Option<usize>,
     unsaved_frame_state: std::cell::Cell<bool>,
     unsaved_trace_interpretations: Vec<NormalizationTrace>,
@@ -2043,6 +2047,7 @@ impl CodexCommandExecutor {
             cursor_cloud_launch_profile: None,
             startup_command: None,
             startup_evidence_error: None,
+            early_provider: None,
             recovery_pending_effects: None,
             unsaved_frame_state: std::cell::Cell::new(false),
             unsaved_trace_interpretations: Vec::new(),
@@ -2178,10 +2183,11 @@ impl CodexCommandExecutor {
         if let Some(error) = &self.startup_evidence_error {
             return Err(error.clone());
         }
-        if self
-            .state
-            .as_ref()
-            .is_some_and(|state| state.startup_attempt.is_some())
+        if !self.holds_early_provider()
+            && self
+                .state
+                .as_ref()
+                .is_some_and(|state| state.startup_attempt.is_some())
         {
             return Err(DurableRunnerError::invalid(
                 "provider startup ownership remains unadmitted",
@@ -2307,6 +2313,15 @@ impl CodexCommandExecutor {
         trigger: ProviderStartupTrigger,
         generation: u64,
     ) -> Result<CodexProvider, DurableRunnerError> {
+        let (provider, handshake) = self.launch_observed_provider(trigger, generation)?;
+        self.finish_observed_provider(provider, handshake)
+    }
+
+    fn launch_observed_provider(
+        &mut self,
+        trigger: ProviderStartupTrigger,
+        generation: u64,
+    ) -> Result<(CodexProvider, CodexStartupHandshake), DurableRunnerError> {
         let state = self
             .state
             .clone()
@@ -2314,7 +2329,7 @@ impl CodexCommandExecutor {
         let profile = self.opencode_launch_profile.clone();
         let cursor_cloud_profile = self.cursor_cloud_launch_profile.clone();
         self.begin_startup(trigger, generation)?;
-        CodexProvider::start_with_tools_observed(
+        CodexProvider::launch_observed(
             &state.config,
             state.tool_bridge.authorized_tools().cloned(),
             state.thread_id.as_deref(),
@@ -2333,27 +2348,6 @@ impl CodexCommandExecutor {
                 })
             },
         )
-        .and_then(|mut provider| {
-            provider.restore_descendant_thread_identities(&state.descendant_thread_ids);
-            if state.config.provider == "cursor_cloud" && state.active_provider_turn_id.is_none() {
-                if let Some(receipt) = &state.cursor_cloud_terminal_receipt {
-                    let acknowledged = (|| {
-                        if let Some(delivery) = provider.cursor_cloud_terminal_delivery()? {
-                            if delivery.receipt() != *receipt {
-                                return Err(crate::local_runner::LocalRunnerError::invalid("Cursor Cloud retained terminal delivery changed across attachment"));
-                            }
-                            let _ = provider.acknowledge_cursor_cloud_terminal(&delivery);
-                        }
-                        Ok(())
-                    })();
-                    if let Err(error) = acknowledged {
-                        self.fail_started_provider(&mut provider);
-                        return Err(error);
-                    }
-                }
-            }
-            Ok(provider)
-        })
         .map_err(|error| {
             DurableRunnerError::invalid(format!(
                 "failed to start {} provider: {error}",
@@ -2361,6 +2355,51 @@ impl CodexCommandExecutor {
             ))
             .with_provider_failure(error.provider_failure())
         })
+    }
+
+    fn finish_observed_provider(
+        &mut self,
+        provider: CodexProvider,
+        handshake: CodexStartupHandshake,
+    ) -> Result<CodexProvider, DurableRunnerError> {
+        let state = self
+            .state
+            .clone()
+            .ok_or_else(|| DurableRunnerError::invalid("provider startup state missing"))?;
+        provider
+            .complete_startup(handshake, &mut |observation| {
+                self.observe_startup(observation).map_err(|error| {
+                    crate::local_runner::LocalRunnerError::invalid(error.to_string())
+                })
+            })
+            .and_then(|mut provider| {
+                provider.restore_descendant_thread_identities(&state.descendant_thread_ids);
+                if state.config.provider == "cursor_cloud" && state.active_provider_turn_id.is_none() {
+                    if let Some(receipt) = &state.cursor_cloud_terminal_receipt {
+                        let acknowledged = (|| {
+                            if let Some(delivery) = provider.cursor_cloud_terminal_delivery()? {
+                                if delivery.receipt() != *receipt {
+                                    return Err(crate::local_runner::LocalRunnerError::invalid("Cursor Cloud retained terminal delivery changed across attachment"));
+                                }
+                                let _ = provider.acknowledge_cursor_cloud_terminal(&delivery);
+                            }
+                            Ok(())
+                        })();
+                        if let Err(error) = acknowledged {
+                            self.fail_started_provider(&mut provider);
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(provider)
+            })
+            .map_err(|error| {
+                DurableRunnerError::invalid(format!(
+                    "failed to start {} provider: {error}",
+                    state.config.provider
+                ))
+                .with_provider_failure(error.provider_failure())
+            })
     }
 
     fn commit_startup_admission(&mut self) -> Result<(), DurableRunnerError> {
@@ -2454,9 +2493,10 @@ impl CodexCommandExecutor {
         let restorable = matches!(
             state.lifecycle.as_str(),
             "session_open" | "turn_active" | "provider_exited"
-        ) || (state.lifecycle == "prepared"
-            && state.thread_id.is_some()
-            && state.provider_process_generation > 0);
+        ) || early_start::uncontacted_early_start(state, &attempt)
+            || (state.lifecycle == "prepared"
+                && state.thread_id.is_some()
+                && state.provider_process_generation > 0);
         let orphaned = match attempt.phase {
             // The runner died while checking the launch, before any spawn.
             ProviderStartupPhase::Intent => attempt.before_spawn,
@@ -3273,12 +3313,16 @@ impl CodexCommandExecutor {
                 .ok_or_else(|| DurableRunnerError::invalid("Codex process generation exhausted"))?;
             let (settled_provider_turn_ids, settled_provider_turn_filter) =
                 state.recovered_settled_provider_turn_ids()?;
-            let mut provider = self
-                .start_observed_provider(ProviderStartupTrigger::Ensure, process_generation)
-                .map_err(|error| {
-                    DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
-                        .with_provider_failure(error.provider_failure())
-                })?;
+            let started = match self.take_early_provider(process_generation)? {
+                Some((provider, handshake)) => self.finish_observed_provider(provider, handshake),
+                None => {
+                    self.start_observed_provider(ProviderStartupTrigger::Ensure, process_generation)
+                }
+            };
+            let mut provider = started.map_err(|error| {
+                DurableRunnerError::invalid(format!("failed to start Codex provider: {error}"))
+                    .with_provider_failure(error.provider_failure())
+            })?;
             let admission = (|| -> Result<(), DurableRunnerError> {
                 provider.enable_durable_tool_call_replays();
                 provider
@@ -5873,6 +5917,9 @@ impl CommandExecutor for CodexCommandExecutor {
     }
 
     fn execute(&mut self, command: &Command) -> Result<CommandExecution, DurableRunnerError> {
+        if command.command_type != "session.open" {
+            self.discard_early_provider()?;
+        }
         self.startup_command = Some(ProviderStartupCommand {
             command_id: command.command_id.clone(),
             controller_seq: command.controller_seq,
@@ -5956,6 +6003,7 @@ impl CommandExecutor for CodexCommandExecutor {
     }
 
     fn rotate_authority(&mut self, config: &DurableRunnerConfig) {
+        let _ = self.discard_early_provider();
         self.recovery_pending_effects = None;
         self.event_identity = Some(ProviderEventIdentity::from_config(config));
     }
@@ -6078,6 +6126,7 @@ impl CommandExecutor for CodexCommandExecutor {
         // Loading the durable provider identity here ensures that cleanup is
         // attempted against the persisted session instead of reporting a
         // successful no-op from an empty in-memory provider slot.
+        self.discard_early_provider()?;
         self.restore()?;
         self.stop_owned_provider()?;
         Ok(())
@@ -6089,6 +6138,7 @@ impl CommandExecutor for CodexCommandExecutor {
         // A fresh terminal-delivery process has no provider handle. Validate
         // its retained state without starting a provider merely to stop it.
         // If this process already owns a handle, stop only that exact handle.
+        self.discard_early_provider()?;
         self.stop_owned_provider()?;
         if self.state.is_none() {
             self.load_state_without_provider()?;
