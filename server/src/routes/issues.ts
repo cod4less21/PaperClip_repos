@@ -2187,26 +2187,18 @@ function companySearchRateLimitActor(req: Request, companyId: string) {
   };
 }
 
-function summarizeIssueReferenceActivityDetails(
-  input:
-    | {
-        addedReferencedIssues: ActivityIssueRelationSummary[];
-        removedReferencedIssues: ActivityIssueRelationSummary[];
-        currentReferencedIssues: ActivityIssueRelationSummary[];
-      }
-    | null
-    | undefined,
-) {
+function summarizeIssueReferenceActivityDetails(input: {
+  addedReferencedIssues: ActivityIssueRelationSummary[];
+  removedReferencedIssues: ActivityIssueRelationSummary[];
+} | null | undefined) {
   if (!input) return {};
+
   return {
     ...(input.addedReferencedIssues.length > 0
       ? { addedReferencedIssues: input.addedReferencedIssues }
       : {}),
     ...(input.removedReferencedIssues.length > 0
       ? { removedReferencedIssues: input.removedReferencedIssues }
-      : {}),
-    ...(input.currentReferencedIssues.length > 0
-      ? { currentReferencedIssues: input.currentReferencedIssues }
       : {}),
   };
 }
@@ -11395,9 +11387,6 @@ export function issueRoutes(
             removedReferencedIssues: referenceDiff.removedReferencedIssues.map(
               summarizeIssueRelationForActivity,
             ),
-            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(
-              summarizeIssueRelationForActivity,
-            ),
           }),
         },
       });
@@ -11508,9 +11497,6 @@ export function issueRoutes(
               summarizeIssueRelationForActivity,
             ),
             removedReferencedIssues: referenceDiff.removedReferencedIssues.map(
-              summarizeIssueRelationForActivity,
-            ),
-            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(
               summarizeIssueRelationForActivity,
             ),
           }),
@@ -11676,9 +11662,6 @@ export function issueRoutes(
               summarizeIssueRelationForActivity,
             ),
             removedReferencedIssues: referenceDiff.removedReferencedIssues.map(
-              summarizeIssueRelationForActivity,
-            ),
-            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(
               summarizeIssueRelationForActivity,
             ),
           }),
@@ -11985,9 +11968,6 @@ export function issueRoutes(
             removedReferencedIssues: referenceDiff.removedReferencedIssues.map(
               summarizeIssueRelationForActivity,
             ),
-            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(
-              summarizeIssueRelationForActivity,
-            ),
           }),
         },
       });
@@ -12117,9 +12097,6 @@ export function issueRoutes(
             summarizeIssueRelationForActivity,
           ),
           removedReferencedIssues: referenceDiff.removedReferencedIssues.map(
-            summarizeIssueRelationForActivity,
-          ),
-          currentReferencedIssues: referenceDiff.currentReferencedIssues.map(
             summarizeIssueRelationForActivity,
           ),
         }),
@@ -13504,9 +13481,6 @@ export function issueRoutes(
               summarizeIssueRelationForActivity,
             ),
             removedReferencedIssues: referenceDiff.removedReferencedIssues.map(
-              summarizeIssueRelationForActivity,
-            ),
-            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(
               summarizeIssueRelationForActivity,
             ),
           }),
@@ -16221,10 +16195,6 @@ export function issueRoutes(
                       updateReferenceDiff.removedReferencedIssues.map(
                         summarizeIssueRelationForActivity,
                       ),
-                    currentReferencedIssues:
-                      updateReferenceDiff.currentReferencedIssues.map(
-                        summarizeIssueRelationForActivity,
-                      ),
                   }
                 : null,
             ),
@@ -16634,10 +16604,6 @@ export function issueRoutes(
                 ),
               removedReferencedIssues:
                 commentReferenceDiff.removedReferencedIssues.map(
-                  summarizeIssueRelationForActivity,
-                ),
-              currentReferencedIssues:
-                commentReferenceDiff.currentReferencedIssues.map(
                   summarizeIssueRelationForActivity,
                 ),
             }),
@@ -19761,7 +19727,6 @@ export function issueRoutes(
                 ...summarizeIssueReferenceActivityDetails({
                   addedReferencedIssues: diff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
                   removedReferencedIssues: diff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
-                  currentReferencedIssues: diff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
                 }),
               },
             }),
@@ -20311,10 +20276,6 @@ export function issueRoutes(
               ),
             removedReferencedIssues:
               commentReferenceDiff.removedReferencedIssues.map(
-                summarizeIssueRelationForActivity,
-              ),
-            currentReferencedIssues:
-              commentReferenceDiff.currentReferencedIssues.map(
                 summarizeIssueRelationForActivity,
               ),
           }),
