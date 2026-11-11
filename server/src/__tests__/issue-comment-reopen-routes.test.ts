@@ -1330,7 +1330,16 @@ describe("issue comment reopen routes", () => {
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
     );
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1", undefined, { expectedStatus: "scheduled_retry" });
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "retry-run-1",
+      "Cancelled because a comment superseded the scheduled retry",
+      expect.objectContaining({
+        expectedStatus: "scheduled_retry",
+        errorCode: "scheduled_retry_superseded",
+        eventMessage: "run cancelled because a comment superseded the scheduled retry",
+        eventPayload: { issueId: expect.any(String) },
+      }),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -1405,7 +1414,16 @@ describe("issue comment reopen routes", () => {
       : await request(app).patch(`/api/issues/${issue.id}`).send({ comment: "Additional context for the active run." });
 
     expect(res.status).toBe(method === "post" ? 201 : 200);
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1", undefined, { expectedStatus: "scheduled_retry" });
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "retry-run-1",
+      "Cancelled because a comment superseded the scheduled retry",
+      expect.objectContaining({
+        expectedStatus: "scheduled_retry",
+        errorCode: "scheduled_retry_superseded",
+        eventMessage: "run cancelled because a comment superseded the scheduled retry",
+        eventPayload: { issueId: expect.any(String) },
+      }),
+    );
     expect(mockIssueService.update).not.toHaveBeenCalledWith(issue.id, expect.objectContaining({ status: "todo" }));
     expect(mockLogActivity).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "heartbeat.cancelled" }));
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -1429,7 +1447,16 @@ describe("issue comment reopen routes", () => {
       .send({ body: "I added the missing detail; please continue." });
 
     expect(res.status).toBe(500);
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1", undefined, { expectedStatus: "scheduled_retry" });
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "retry-run-1",
+      "Cancelled because a comment superseded the scheduled retry",
+      expect.objectContaining({
+        expectedStatus: "scheduled_retry",
+        errorCode: "scheduled_retry_superseded",
+        eventMessage: "run cancelled because a comment superseded the scheduled retry",
+        eventPayload: { issueId: expect.any(String) },
+      }),
+    );
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalledWith(
@@ -2112,7 +2139,16 @@ describe("issue comment reopen routes", () => {
         actorUserId: "local-board",
       }),
     );
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1", undefined, { expectedStatus: "scheduled_retry" });
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "retry-run-1",
+      "Cancelled because a comment superseded the scheduled retry",
+      expect.objectContaining({
+        expectedStatus: "scheduled_retry",
+        errorCode: "scheduled_retry_superseded",
+        eventMessage: "run cancelled because a comment superseded the scheduled retry",
+        eventPayload: { issueId: expect.any(String) },
+      }),
+    );
     await waitForWakeup(() =>
       expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
         "22222222-2222-4222-8222-222222222222",
@@ -2143,7 +2179,16 @@ describe("issue comment reopen routes", () => {
       .send({ comment: "Retry window is over; please continue." });
 
     expect(res.status).toBe(500);
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1", undefined, { expectedStatus: "scheduled_retry" });
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "retry-run-1",
+      "Cancelled because a comment superseded the scheduled retry",
+      expect.objectContaining({
+        expectedStatus: "scheduled_retry",
+        errorCode: "scheduled_retry_superseded",
+        eventMessage: "run cancelled because a comment superseded the scheduled retry",
+        eventPayload: { issueId: expect.any(String) },
+      }),
+    );
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockIssueService.addComment).not.toHaveBeenCalled();
     expect(mockLogActivity).not.toHaveBeenCalledWith(
@@ -2993,7 +3038,15 @@ describe("issue comment reopen routes", () => {
 
     expect(res.status).toBe(200);
     expect(mockHeartbeatService.getRun).toHaveBeenCalledWith("run-1");
-    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("run-1");
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "run-1",
+      "Cancelled because the issue was set to cancelled",
+      expect.objectContaining({
+        errorCode: "issue_cancelled",
+        eventMessage: "run cancelled because the issue was set to cancelled",
+        eventPayload: { issueId: expect.any(String) },
+      }),
+    );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
