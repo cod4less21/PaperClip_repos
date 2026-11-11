@@ -75,6 +75,7 @@ import { filterResolvedGitHubConnectionsForRun } from "../git-credentials.js";
 import type {
   AdapterRuntimeMcpAccess,
   AdapterRuntimeMcpServer,
+  AdapterRuntimeMcpToolPolicy,
   AdapterRuntimeToolAccess,
 } from "../../adapters/index.js";
 import { createRuntimeToolsToken } from "../../runtime-tools-token.js";
@@ -862,6 +863,7 @@ type ManagedMcpGatewayRunConfig = {
     endpointPath: string;
     bearerToken: string;
     tokenPrefix: string;
+    tools: AdapterRuntimeMcpToolPolicy[];
   }>;
 };
 
@@ -1212,6 +1214,10 @@ export async function buildPaperclipRuntimeMcpServers(input: {
     },
     actor: { agentId: input.agent.id },
   });
+  const tools = await service.listRuntimeToolPoliciesForNamedGateway({
+    gatewayId: gateway!.id,
+    bearerToken: token.token,
+  });
 
   return [
     {
@@ -1219,6 +1225,7 @@ export async function buildPaperclipRuntimeMcpServers(input: {
       url: `${paperclipApiBaseUrl()}/mcp/gateways/${gateway!.gatewayPublicId}`,
       token: token.token,
       connectionId: `assignment:${assignmentDigest}`,
+      tools,
     },
   ];
 }
@@ -1534,6 +1541,10 @@ export async function createManagedMcpRunConfig(input: {
       },
       actor: { agentId: input.agent.id },
     });
+    const tools = await service.listRuntimeToolPoliciesForNamedGateway({
+      gatewayId: gateway.id,
+      bearerToken: token.token,
+    });
     managedGateways.push({
       id: gateway.id,
       name: gateway.name,
@@ -1542,6 +1553,7 @@ export async function createManagedMcpRunConfig(input: {
       endpointPath: `/mcp/gateways/${gateway.gatewayPublicId}`,
       bearerToken: token.token,
       tokenPrefix: token.tokenPrefix,
+      tools,
     });
   }
 
