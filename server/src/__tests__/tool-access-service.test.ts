@@ -8251,7 +8251,8 @@ describeEmbeddedPostgres("tool access service", () => {
       };
       let beforeRepositoryResponse = async () => {};
       let installationSuspended = false;
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      let rejectCatalog = false;
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
         const href = String(url);
         if (href === "https://api.github.com/user") {
           return mcpHttpResponse({
@@ -8289,6 +8290,15 @@ describeEmbeddedPostgres("tool access service", () => {
           });
         }
         if (href === GITHUB_CONNECTOR_PROFILES["github.code"].serverUrl) {
+          expect(new Headers(init?.headers).get("Authorization")).toBe(
+            "Bearer ghu_non_expiring_access_token",
+          );
+          if (rejectCatalog) {
+            return new Response("Unauthorized", {
+              status: 401,
+              headers: { "www-authenticate": "Bearer" },
+            });
+          }
           return mcpHttpResponse(catalogResponse([
                 {
                   name: "get_pull_request",
@@ -8536,6 +8546,52 @@ describeEmbeddedPostgres("tool access service", () => {
             service.checkHealth(connected.connectionId, actor),
           ).resolves.toMatchObject({ connection: { healthStatus: "ok" } });
           expect(connector.setWebhookBinding).toHaveBeenCalled();
+
+          await service.refreshCatalog(connected.connectionId, { actorType: "system" });
+          await service.refreshCatalog(connected.connectionId, { actorType: "agent", actorId: agent.id });
+          const other = await createAgent(db, company.id);
+          await expect(
+            service.refreshCatalog(connected.connectionId, { actorType: "agent", actorId: other.id }),
+          ).rejects.toMatchObject({ details: { code: "agent_authorization_required" } });
+          await db.insert(connectionGrants).values({
+            companyId: company.id,
+            connectionId: connected.connectionId,
+            kind: "agent",
+            subjectAgentId: other.id,
+            status: "active",
+            credentialSecretRefs: [],
+          });
+          await expect(
+            service.refreshCatalog(connected.connectionId, { actorType: "system" }),
+          ).rejects.toMatchObject({ details: { code: "agent_authorization_required" } });
+          await service.refreshCatalog(connected.connectionId, { actorType: "agent", actorId: agent.id });
+          await db
+            .delete(connectionGrants)
+            .where(
+              and(
+                eq(connectionGrants.connectionId, connected.connectionId),
+                eq(connectionGrants.subjectAgentId, other.id),
+              ),
+            );
+
+          const [beforeChallenge] = await db
+            .select()
+            .from(toolConnections)
+            .where(eq(toolConnections.id, connected.connectionId));
+          rejectCatalog = true;
+          await expect(
+            service.refreshCatalog(connected.connectionId, { actorType: "system" }),
+          ).rejects.toMatchObject({ details: { code: "oauth_reauthorization_required" } });
+          const [afterChallenge] = await db
+            .select()
+            .from(toolConnections)
+            .where(eq(toolConnections.id, connected.connectionId));
+          expect(afterChallenge!.config.oauth).toEqual(beforeChallenge!.config.oauth);
+          const [rejectedGrant] = await db
+            .select()
+            .from(connectionGrants)
+            .where(eq(connectionGrants.id, grant!.id));
+          expect(rejectedGrant!.status).toBe("needs_reauthorization");
         }
       } finally {
         githubDefinition.ownershipAvailability = previousOwnershipAvailability;
