@@ -1741,6 +1741,47 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     };
   }
 
+  async function reacknowledgeMutationScope(scope: {
+    kind: "watchdog";
+    watchdogId: string;
+    companyId: string;
+    watchedIssueId: string;
+    stopFingerprint: string | null;
+  }) {
+    const watchdog = await db
+      .select()
+      .from(issueWatchdogs)
+      .where(and(
+        eq(issueWatchdogs.id, scope.watchdogId),
+        eq(issueWatchdogs.companyId, scope.companyId),
+        eq(issueWatchdogs.issueId, scope.watchedIssueId),
+        eq(issueWatchdogs.status, "active"),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!watchdog) {
+      return {
+        acked: false as const,
+        reason: "Task-watchdog run context is not backed by an active persisted watchdog.",
+      };
+    }
+
+    const input = await collectClassifierInput(watchdog.companyId, watchdog);
+    const classification = classifyTaskWatchdogSubtree(input);
+    if (classification.state === "stopped") {
+      return {
+        acked: true as const,
+        stopFingerprint: classification.stopFingerprint,
+        classification,
+      };
+    }
+
+    return {
+      acked: false as const,
+      reason: "Task-watchdog review cannot be reacknowledged because the watched subtree no longer has a stopped path.",
+      classification,
+    };
+  }
+
   return {
     readIdleSchedule: async (tx: Pick<Db, "select" | "execute">, now: number,
       owner: () => DeadlineReconciliationSnapshot, checkBudget: () => void = () => {}): Promise<IdleDeadlineSnapshot> => {
@@ -1955,5 +1996,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     },
 
     revalidateMutationScope,
+    reacknowledgeMutationScope,
   };
 }
