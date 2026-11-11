@@ -10,6 +10,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
   issueRelations,
@@ -48,6 +49,7 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     await db.delete(issueRelations);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companyMemberships);
@@ -443,7 +445,7 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     expect(checkoutActivity).toHaveLength(0);
   });
 
-  it("restricts admin force-release to board users with company access and writes an audit event", async () => {
+  it("restricts admin force-release to board users, cancels a live execution run, and writes an audit event", async () => {
     const { companyId, agentId, failedRunId, currentRunId } = await seedCompanyAgentAndRuns();
     const issueId = randomUUID();
     await db.insert(issues).values({
@@ -454,7 +456,7 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       priority: "high",
       assigneeAgentId: agentId,
       checkoutRunId: currentRunId,
-      executionRunId: failedRunId,
+      executionRunId: currentRunId,
       executionAgentNameKey: "codexcoder",
       executionLockedAt: new Date(),
     });
@@ -487,8 +489,15 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     });
     expect(res.body.previous).toEqual({
       checkoutRunId: currentRunId,
-      executionRunId: failedRunId,
+      executionRunId: currentRunId,
     });
+
+    const executionRun = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, currentRunId))
+      .then((rows) => rows[0]);
+    expect(executionRun).toEqual({ status: "cancelled" });
 
     const audit = await db
       .select({
@@ -508,7 +517,7 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
         issueId,
         actorUserId: "board-user",
         prevCheckoutRunId: currentRunId,
-        prevExecutionRunId: failedRunId,
+        prevExecutionRunId: currentRunId,
         clearAssignee: true,
       },
     });
