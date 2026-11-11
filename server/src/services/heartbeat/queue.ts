@@ -152,6 +152,7 @@ import {
   ISSUE_REWAKE_LOOKBACK_MS,
   ISSUE_REWAKE_RUN_SAMPLE_LIMIT,
   evaluateIssueRewakeThrottle,
+  isRoutineRunCompletionComment,
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity, publishActivity, type ActivityPublication } from "../activity-log.js";
@@ -4407,7 +4408,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 (sampleRun) => sampleRun.id,
               );
               const progressRows = await tx
-                .select({ runId: activityLog.runId })
+                .select({ runId: activityLog.runId, action: activityLog.action, details: activityLog.details })
                 .from(activityLog)
                 .where(
                   and(
@@ -4438,6 +4439,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                           activityLog.action,
                           ISSUE_NEW_INPUT_ACTIVITY_ACTIONS,
                         ),
+                        // A run's materialized final answer can arrive after
+                        // finishedAt. It is not new issue input by itself.
+                        sql`not (${activityLog.action} = 'issue.comment_added' and (
+                          coalesce(${activityLog.details} ->> 'completionReply' = 'true', false) or
+                          coalesce(${activityLog.details} ->> 'source' = 'run_presentation_resolver', false)
+                        ))`,
                         wakeCommentId && opts.requestedByActorType === "agent"
                           ? ne(activityLog.actorType, "agent")
                           : undefined,
@@ -4451,6 +4458,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 recentTerminalRuns,
                 runIdsWithIssueProgress: new Set(
                   progressRows
+                    .filter((row) => row.action !== "issue.comment_added" || !isRoutineRunCompletionComment(row.details))
                     .map((row) => row.runId)
                     .filter((runId): runId is string => Boolean(runId)),
                 ),
